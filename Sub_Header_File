@@ -1,0 +1,143 @@
+module idx_sorted_32to8 (
+    input clk,
+    input rst,
+    input start,
+    input [31:0] unsorted_data,
+    input [7:0] search_key,
+    input [7:0] xmask,
+    output reg [31:0] sorted_data,
+    output reg [3:0] match_lines,
+    output reg done,
+    output reg [8:0] sorted_indices,   // [7:6]=index of highest, ..., [1:0]=index of lowest
+    output reg [7:0] unsorted_indices
+);
+
+    reg [7:0] data_array[0:3];
+    reg [1:0] index_array[0:3];  // Original positions
+    reg [2:0] bit_pos;
+    reg [1:0] pass_count;
+    reg [1:0] compare_idx;
+    reg [7:0] temp_data;
+    reg [1:0] temp_index;
+    wire [3:0] internal_match;
+    
+
+    localparam IDLE = 2'b00, LOAD = 2'b01, SORT = 2'b10, DONE = 2'b11;
+    reg [1:0] state;
+
+    integer i;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            done <= 0;
+            sorted_data <= 0;
+            sorted_indices <= 0;
+            match_lines <= 0;
+            bit_pos <= 3'd7;
+            pass_count <= 0;
+            compare_idx <= 0;
+            unsorted_indices <= 8'd0_1_2_3;
+
+            for (i = 0; i < 4; i = i + 1) begin
+                index_array[i] <= i[1:0];
+            end
+        end else begin
+            case (state)
+                IDLE: begin
+                    done <= 0;
+                    if (start) begin
+                        state <= LOAD;
+                        bit_pos <= 3'd7;
+                        pass_count <= 0;
+                        compare_idx <= 0;
+                    end
+                end
+
+                LOAD: begin
+                    data_array[0] <= unsorted_data[7:0];
+                    data_array[1] <= unsorted_data[15:8];
+                    data_array[2] <= unsorted_data[23:16];
+                    data_array[3] <= unsorted_data[31:24];
+
+                    index_array[0] <= 2'd0;
+                    index_array[1] <= 2'd1;
+                    index_array[2] <= 2'd2;
+                    index_array[3] <= 2'd3;
+
+                    unsorted_indices <= {2'd3, 2'd2, 2'd1, 2'd0};
+                    state <= SORT;
+                end
+
+                SORT: begin
+                    if (compare_idx < 3) begin
+                        if (
+                            ((data_array[compare_idx][bit_pos] & ~xmask[bit_pos]) >
+                             (data_array[compare_idx+1][bit_pos] & ~xmask[bit_pos])) ||
+                            (((data_array[compare_idx][bit_pos] & ~xmask[bit_pos]) ==
+                              (data_array[compare_idx+1][bit_pos] & ~xmask[bit_pos])) &&
+                             ((data_array[compare_idx] & ~xmask) >
+                              (data_array[compare_idx+1] & ~xmask)))
+                        ) begin
+                            // Swap data
+                            temp_data = data_array[compare_idx];
+                            data_array[compare_idx] = data_array[compare_idx+1];
+                            data_array[compare_idx+1] = temp_data;
+
+                            // Swap indices
+                            temp_index = index_array[compare_idx];
+                            index_array[compare_idx] = index_array[compare_idx+1];
+                            index_array[compare_idx+1] = temp_index;
+                        end
+                        compare_idx <= compare_idx + 1;
+                    end else begin
+                        compare_idx <= 0;
+                        pass_count <= pass_count + 1;
+                        if (pass_count == 2) begin
+                            if (bit_pos > 0)
+                                bit_pos <= bit_pos - 1;
+                            else
+                                state <= DONE;
+                            pass_count <= 0;
+                        end
+                    end
+                end
+
+                DONE: begin
+                    sorted_data <= {data_array[3], data_array[2], data_array[1], data_array[0]};
+                    sorted_indices <= {index_array[3],index_array[2],index_array[1],index_array[0]};
+                    match_lines <= internal_match;
+                    done <= 1;
+                    if (!start)
+                        state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+    // TCAM Match Logic
+    genvar j;
+    generate
+        for (j = 0; j < 4; j = j + 1) begin : tcam_array
+            tcam_line_idx #(.KEY_WIDTH(8)) tcam_inst (
+                .key(search_key),
+                .stored_key(data_array[j]),
+                .xmask(xmask),
+                .match(internal_match)
+            );
+        end
+    endgenerate
+
+endmodule
+
+// TCAM Comparator
+module tcam_line_idx #(
+    parameter KEY_WIDTH = 8
+)(
+    input [KEY_WIDTH-1:0] key,
+    input [KEY_WIDTH-1:0] stored_key,
+    input [KEY_WIDTH-1:0] xmask,
+    output match
+);
+    assign match = ~|((key ^ stored_key) & ~xmask);
+endmodule
